@@ -5,6 +5,9 @@ to an HDMapping session.
 Stages, each reported on its own:
   1. preflight  the point cloud topic must be in the bag as sensor_msgs/PointCloud2
                 with x, y, z fields (exit code 42 if not: nothing is run)
+     viewer     with --visualize, a throwaway process first opens an OpenGL
+                window; if that fails, it is tried with software rendering, and
+                if that fails too, SLAM runs without the viewer
   2. SLAM       kiss_slam.pipeline.SlamPipeline on KISS-ICP's rosbag dataloader,
                 with the author's default parameters or the given config file;
                 the results (poses in TUM format, local maps, closures, config)
@@ -16,12 +19,27 @@ The exit code is 42 for a preflight failure, 1 for any other failure.
 
 import argparse
 import os
+import subprocess
 import sys
 import traceback
 from pathlib import Path
 
 PREFLIGHT_FAILED = 42
 TIME_FIELDS = ("t", "timestamp", "time")   # the names KISS-ICP's reader accepts
+GL_CHECK_TIMEOUT_S = 120
+
+# Opens and closes a small hidden Open3D window: exit 0 if OpenGL works. Run in
+# its own process, so a GL crash cannot take KISS-SLAM down.
+GL_CHECK = r"""
+import sys
+import open3d as o3d
+vis = o3d.visualization.Visualizer()
+if not vis.create_window(window_name="KISS-SLAM viewer check", width=320, height=240, visible=False):
+    sys.exit(3)
+vis.poll_events()
+vis.update_renderer()
+vis.destroy_window()
+"""
 
 
 class PreflightError(Exception):
@@ -72,6 +90,52 @@ def preflight(bag, topic):
         print("[preflight] WARNING: no per-point time field (t/timestamp/time): KISS-SLAM cannot deskew the scans")
 
 
+def opengl_renderer(env):
+    """The OpenGL renderer name from glxinfo, e.g. the GPU or 'llvmpipe' (CPU); None if unknown."""
+    try:
+        out = subprocess.run(["glxinfo", "-B"], env=env, capture_output=True, text=True, timeout=30)
+    except Exception:
+        return None
+    for line in out.stdout.splitlines():
+        if "OpenGL renderer string" in line:
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def check_viewer():
+    """True if an OpenGL window opens. Falls back to software rendering (and
+    keeps it for the run) when only that works."""
+    attempts = []
+    if os.environ.get("LIBGL_ALWAYS_SOFTWARE"):
+        attempts.append(("software rendering", None))
+    else:
+        attempts.append(("GPU rendering", None))
+        attempts.append(("software rendering", "1"))
+    for label, software in attempts:
+        env = dict(os.environ)
+        if software:
+            env["LIBGL_ALWAYS_SOFTWARE"] = software
+        try:
+            result = subprocess.run([sys.executable, "-c", GL_CHECK], env=env, capture_output=True,
+                                    text=True, timeout=GL_CHECK_TIMEOUT_S)
+            ok = result.returncode == 0
+            detail = f"exit {result.returncode}"
+            tail = (result.stderr or "").strip().splitlines()[-3:]
+        except subprocess.TimeoutExpired:
+            ok, detail, tail = False, f"no answer in {GL_CHECK_TIMEOUT_S} s", []
+        except Exception as e:
+            ok, detail, tail = False, f"{type(e).__name__}: {e}", []
+        if ok:
+            if software:
+                os.environ["LIBGL_ALWAYS_SOFTWARE"] = software
+            print(f"[viewer] {label}, OpenGL renderer: {opengl_renderer(env) or 'unknown'}")
+            return True
+        print(f"[viewer] the OpenGL check failed with {label} ({detail})")
+        for line in tail:
+            print(f"[viewer]   {line}")
+    return False
+
+
 def run_slam(bag, topic, out_root, config_file, visualize):
     from kiss_icp.datasets import dataset_factory
     from kiss_slam.pipeline import SlamPipeline
@@ -89,8 +153,19 @@ def run_slam(bag, topic, out_root, config_file, visualize):
     pipeline.slam_config.out_dir = out_root
     pipeline.config.out_dir = out_root
     if visualize:
+        viewer = pipeline.visualizer
         # The viewer starts paused until SPACE is pressed; the benchmark runs unattended.
-        pipeline.visualizer.play_crun = True
+        viewer.play_crun = True
+        # ESC and Q call os._exit(0), which ends KISS-SLAM before it writes any
+        # result. They are rebound here, on the viewer object, instead of
+        # patching KISS-SLAM: the same keys upstream registers (GLFW escape,
+        # ASCII escape, Q) now only print a note.
+        def keep_running(vis):
+            print("\n[viewer] ESC/Q are disabled in the benchmark: they would end KISS-SLAM "
+                  "without results. Run with VIS=0 for no viewer.")
+            return False
+        for key in (256, 27, ord("Q")):
+            viewer.vis.register_key_callback(key, keep_running)
     print(f"[kiss-slam] config: {'author defaults' if not config_file else config_file}")
     print(f"[kiss-slam] {len(dataset)} scans on {topic}; results -> {out_root}")
 
@@ -148,6 +223,17 @@ def main():
     except Exception as e:  # a bug in the check must not start a run blind
         print(f"[preflight] ERROR: the check itself failed ({type(e).__name__}: {e})", file=sys.stderr)
         sys.exit(PREFLIGHT_FAILED)
+
+    # The viewer may cost the live view, never the run.
+    if args.visualize and not args.results_dir:
+        try:
+            usable = check_viewer()
+        except Exception as e:
+            print(f"[viewer] the OpenGL check itself failed ({type(e).__name__}: {e})")
+            usable = False
+        if not usable:
+            print("[viewer] off: no OpenGL window can be opened; KISS-SLAM runs without the viewer")
+            args.visualize = False
 
     if args.results_dir:
         results_dir = args.results_dir

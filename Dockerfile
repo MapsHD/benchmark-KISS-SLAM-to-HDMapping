@@ -68,18 +68,11 @@ got = {p: v(p) for p in ('kiss_icp', 'map_closures', 'open3d')}; \
 want = {'kiss_icp': '1.2.3', 'map_closures': '2.0.2', 'open3d': '0.19.0'}; \
 assert got == want, f'dependency versions changed: {got}'; print('[build] versions', got)"
 
-# ── Benchmark viewer patch: closing the viewer does not end the run ──────────
-# See overlay/viewer/kiss_slam_viewer_keep_running.patch (visualisation only;
-# the estimate is unchanged). Upstream, ESC/Q calls os._exit(0), which ends
-# KISS-SLAM before it writes any result, and closing the window while paused
-# hangs. Applied to the installed package in a late layer, so a viewer change
-# does not rebuild g2o and SuiteSparse.
-COPY ./overlay/viewer/ ./viewer/
-RUN SITE=$(python3 -c "import kiss_slam, os; print(os.path.dirname(os.path.dirname(kiss_slam.__file__)))") && \
-    patch -p1 --batch -d "$SITE" < viewer/kiss_slam_viewer_keep_running.patch && \
-    grep -q "self.viewer_closed = True" "$SITE/kiss_slam/tools/visualizer.py" && \
-    ! grep -qE "^\s*os\._exit\(" "$SITE/kiss_slam/tools/visualizer.py" && \
-    python3 -m py_compile "$SITE/kiss_slam/tools/visualizer.py"
+# glxinfo: the run log names the OpenGL renderer the viewer got (the GPU, or
+# llvmpipe for CPU rendering). A late layer, so the layers above stay cached.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    mesa-utils \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY ./overlay/scripts/ ./scripts/
 
@@ -93,6 +86,7 @@ RUN O3D=$(python3 -c "import importlib.util, os; print(os.path.dirname(importlib
     python3 -c "import kiss_icp, kiss_slam, map_closures, open3d, laspy, lazrs, rosbags, matplotlib; \
 from kiss_icp.datasets import dataset_factory; from kiss_icp.datasets.rosbag import RosbagDataset; \
 from kiss_slam.pipeline import SlamPipeline; print('[build] KISS-SLAM, dataloaders and converter deps OK')" && \
-    test -f /kiss_ws/scripts/kiss_slam_bench.py && test -f /kiss_ws/scripts/kiss_slam_to_hdmapping.py
+    test -f /kiss_ws/scripts/kiss_slam_bench.py && test -f /kiss_ws/scripts/kiss_slam_to_hdmapping.py && \
+    command -v glxinfo >/dev/null
 
 CMD ["bash"]

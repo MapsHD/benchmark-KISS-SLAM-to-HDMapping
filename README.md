@@ -70,7 +70,7 @@ GUI file selector is used (requires `zenity`).
 | `CONFIG_FILE` | none (author's defaults) | KISS-SLAM parameter file, see below |
 | `TOPIC` | `/livox/pointcloud` | `PointCloud2` topic in the bag |
 | `VIS` | `1` | KISS-SLAM's Open3D live viewer (off without a `DISPLAY`) |
-| `LIBGL_SW` | `1` | Mesa software rendering for the viewer |
+| `LIBGL_SW` | `0` | `1` = the viewer always renders on the CPU; `0` = on the GPU when one is found |
 | `POINT_SKIP` | `1` | the converter keeps every Nth point |
 | `CONVERT_RESULTS_DIR` | none | an existing results directory in the container, e.g. `/output/kiss-slam-results/<timestamp>`: skip SLAM, only convert |
 
@@ -98,12 +98,30 @@ no scan is dropped. There is no playback and no recording.
 
 With `VIS=1`, KISS-SLAM's Open3D viewer shows the run live:
 - yellow: the current local map;
-- green: the pose of every scan;
+- green: the pose of every scan, redrawn from the optimised poses when a local
+  map is finished or a loop is closed;
 - blue: the key poses of the local maps and the edges between them.
 
 The camera is free: rotate with the left mouse button, pan with Ctrl + left
 button, zoom with the wheel. `C` fits the view to everything drawn, and `SPACE`
-pauses. Closing the viewer (or `ESC`) does not stop KISS-SLAM.
+pauses; while paused, the camera responds immediately. `ESC` and `Q` are
+disabled (see the notes below); to run without the viewer, set `VIS=0`.
+
+**GPU.** The viewer uses a GPU when the run script finds one, and never needs
+one:
+- AMD or Intel graphics: the script passes `/dev/dri` into the container.
+- NVIDIA with the
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html):
+  the script adds `--runtime=nvidia` (or `--gpus all` when Docker does not list
+  the nvidia runtime).
+- Otherwise the viewer renders on the CPU, which is slower.
+
+If Docker refuses to start the container with these options, the script
+retries with fewer of them, down to CPU rendering. Before SLAM starts, a
+separate process opens a test window. If that fails, the
+test is repeated with CPU rendering. If that fails too, KISS-SLAM runs without
+the viewer. The log names the OpenGL renderer in use (`llvmpipe` means the
+CPU). KISS-SLAM itself always runs on the CPU.
 
 When KISS-SLAM has finished, the same container converts its output into the
 HDMapping session format.
@@ -144,13 +162,11 @@ the other converters.
 **Timestamps.** The benchmark does not change KISS-SLAM's clock. The
 trajectory times are the bag times of the scans.
 
-**Viewer patch.** Upstream, `ESC` or `Q` in the viewer ends the whole process
-with `os._exit(0)` before KISS-SLAM writes any result. Closing the window while
-the viewer is paused leaves the run waiting forever. The Docker build applies
-[overlay/viewer/kiss_slam_viewer_keep_running.patch](overlay/viewer/kiss_slam_viewer_keep_running.patch),
-which only closes the window in both cases. The run goes on, and the estimate
-is unchanged. The run script also starts the viewer playing, where upstream it
-starts paused until `SPACE`.
+**Viewer.** KISS-SLAM's code is not changed. Two settings are made from the
+benchmark's run script, on the viewer object:
+- The viewer starts playing; upstream it starts paused until `SPACE`.
+- `ESC` and `Q` are rebound to print a note. Upstream they end the whole
+  process with `os._exit(0)` before KISS-SLAM writes any result.
 
 **Optional outputs.** The run script calls KISS-SLAM's pipeline stage by stage.
 SLAM and the pose file are required. The closure plot, the local maps, the g2o
