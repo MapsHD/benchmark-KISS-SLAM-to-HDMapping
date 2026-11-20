@@ -1,9 +1,3 @@
 [submodule "src/KISS-SLAM"]
 	path = src/KISS-SLAM
 	url = https://github.com/PRBonn/kiss-slam.git
-[submodule "src/livox_ros_driver2"]
-	path = src/livox_ros_driver2
-	url = https://github.com/Livox-SDK/livox_ros_driver2.git
-[submodule "src/kiss-slam-to-hdmapping/src/3rdparty/LASzip"]
-	path = src/kiss-slam-to-hdmapping/src/3rdparty/LASzip
-	url = https://github.com/LASzip/LASzip.git
